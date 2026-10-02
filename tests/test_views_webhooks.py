@@ -1,11 +1,11 @@
 """Tests for the VoxBento webhook receiver."""
 
+import ast
 import hashlib
 import hmac
 import importlib
 import inspect
 import json
-import re
 import time
 from unittest.mock import patch
 
@@ -92,10 +92,14 @@ def test_interpreter_joined_returns_ok(client, event, connected_room, interpreta
 
 
 def test_webhook_views_import_notify_from_a_module_that_defines_it():
-    source = inspect.getsource(views_webhooks)
-    modules = re.findall(r"from (\.\w+) import notify_video_room_config_changed", source)
+    tree = ast.parse(inspect.getsource(views_webhooks))
+    imports = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and "notify_video_room_config_changed" in [a.name for a in node.names]
+    ]
 
-    assert modules
-    for module in modules:
-        imported = importlib.import_module(module, package="interpretation")
-        assert callable(getattr(imported, "notify_video_room_config_changed"))
+    assert imports
+    for node in imports:
+        module = importlib.import_module("." * node.level + (node.module or ""), package="interpretation")
+        assert hasattr(module, "notify_video_room_config_changed"), module.__name__
