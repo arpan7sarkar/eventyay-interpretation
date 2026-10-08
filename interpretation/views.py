@@ -305,7 +305,53 @@ class InterpretationRoomSettings(
             from django.db import transaction
 
             sync_needed = False
+
             with transaction.atomic():
+                # Handle API Keys first inside transaction
+                api_keys = [
+                    "openai_api_key",
+                    "deepgram_api_key",
+                    "nvidia_api_key",
+                    "elevenlabs_api_key",
+                    "translation_openai_api_key",
+                    "openrouter_api_key",
+                    "gemini_api_key",
+                    "anthropic_api_key",
+                    "groq_api_key",
+                ]
+
+                grant = None
+                updated_keys = False
+                if form.cleaned_data.get("interpreter") == "voxbento":
+                    from .models import VoxbentoOAuthGrant
+
+                    grant = VoxbentoOAuthGrant.objects.filter(event=event).first()
+                    if grant:
+                        for key in api_keys:
+                            val = form.cleaned_data.get(key)
+                            if val:
+                                setattr(grant, key, val)
+                                updated_keys = True
+
+                        from .api_key_validator import validate_provider_key
+
+                        tp = form.cleaned_data.get("transcription_provider")
+                        if form.cleaned_data.get("enable_transcription") and tp and tp != "none" and tp != "local":
+                            key_val = getattr(grant, f"{tp}_api_key", None)
+                            if key_val and not validate_provider_key(tp, key_val):
+                                return None, f"The API key for {tp.capitalize()} is invalid, expired, or revoked."
+
+                        vp = form.cleaned_data.get("translation_provider")
+                        if form.cleaned_data.get("enable_translation") and vp and vp != "none" and vp != "local":
+                            key_name = "translation_openai_api_key" if vp == "openai" else f"{vp}_api_key"
+                            key_val = getattr(grant, key_name, None)
+                            if key_val and not validate_provider_key(vp, key_val):
+                                return (
+                                    None,
+                                    f"The API key for {vp.capitalize()} (Translation) is invalid, expired, or revoked.",
+                                )
+
+                # Validation passed, safe to update room interpretation
                 interpretation = update_room_interpretation(
                     room,
                     event,
@@ -322,32 +368,11 @@ class InterpretationRoomSettings(
                     },
                 )
 
-                # Handle API Keys
-                api_keys = [
-                    "openai_api_key",
-                    "deepgram_api_key",
-                    "nvidia_api_key",
-                    "elevenlabs_api_key",
-                    "translation_openai_api_key",
-                    "openrouter_api_key",
-                    "gemini_api_key",
-                    "anthropic_api_key",
-                    "groq_api_key",
-                ]
+                if grant and updated_keys:
+                    grant.save(update_fields=api_keys)
+                    sync_needed = True
 
-                if form.cleaned_data.get("interpreter") == "voxbento":
-                    from .models import VoxbentoOAuthGrant
-
-                    grant = VoxbentoOAuthGrant.objects.filter(event=event).first()
-                    if grant:
-                        for key in api_keys:
-                            val = form.cleaned_data.get(key)
-                            if val:
-                                setattr(grant, key, val)
-
-                        grant.save(update_fields=api_keys)
-                        sync_needed = True
-
+            # Sync after atomic block to avoid locking during network request
             if sync_needed:
                 from .backends.voxbento_api import sync_voxbento_api_keys
 
@@ -370,7 +395,21 @@ class InterpretationRoomSettings(
         if error is not None:
             if isinstance(error, str):
                 messages.error(request, error)
-                form = RoomConfigureForm(request.POST, prefix=prefix, event=event)
+                is_api_error = "invalid, expired, or revoked" in error
+
+                invalid_keys = {}
+                if is_api_error:
+                    # Quick parse the error to find the provider so we can highlight the right box
+                    if "(Translation)" in error:
+                        for p in ["openai", "openrouter", "gemini", "anthropic", "groq"]:
+                            if p in error:
+                                invalid_keys["translation_openai" if p == "openai" else p] = True
+                    else:
+                        for p in ["openai", "deepgram", "nvidia", "elevenlabs"]:
+                            if p in error:
+                                invalid_keys[p] = True
+
+                form = RoomConfigureForm(request.POST, prefix=prefix, event=event, invalid_api_keys=invalid_keys)
             else:
                 for field, field_errors in error.errors.items():
                     for err in field_errors:
@@ -431,19 +470,26 @@ class InterpretationRoomSettings(
         event = self.request.event
         expanded_room = self.request.GET.get("room")
         existing = {ri.room_id: ri for ri in RoomInterpretation.objects.filter(room__event=event)}
+        getattr(event, "voxbento_oauth_grant", None)
         rooms = []
         for room in event.rooms.filter(deleted=False).order_by("name"):
             interpretation = existing.get(room.pk)
             data = serialize_room_interpretation(room, event, interpretation)
             prefix = room_form_prefix(room.pk)
             selected = data["interpreter"]
+
+            api_key_error = None
+            invalid_api_keys = {}
+
             rooms.append(
                 {
                     "room": room,
                     "data": data,
+                    "api_key_error": api_key_error,
                     "configure_form": RoomConfigureForm(
                         prefix=prefix,
                         event=event,
+                        invalid_api_keys=invalid_api_keys,
                         initial={
                             "interpreter": data["interpreter"],
                             "room_enabled": data["room_enabled"],

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from django.core.exceptions import ValidationError
+from django.db import transaction
 from django.utils.translation import gettext_lazy as _
 
 from .backends import (
@@ -105,6 +106,7 @@ def serialize_room_interpretation(room, event, interpretation=None) -> dict:
     backend = get_backend(interpreter)
     stored_language_streams = list(getattr(interpretation, "language_streams", None) or []) if interpretation else []
     return {
+        "ui_sync_supported": True,
         "interpreter": interpreter,
         "interpreter_label": str(backend.label),
         "room_enabled": room_enabled,
@@ -177,8 +179,17 @@ def update_room_interpretation(room, event, data: dict) -> RoomInterpretation:
             raise ValueError(_("Unknown interpreter."))
         interpretation.interpreter = interpreter
 
+    changed_room_enabled = False
     if "room_enabled" in data:
-        interpretation.room_enabled = _parse_bool(data.get("room_enabled"))
+        new_room_enabled = _parse_bool(data.get("room_enabled"))
+        if interpretation.room_enabled != new_room_enabled:
+            changed_room_enabled = True
+        interpretation.room_enabled = new_room_enabled
+
+    if interpretation.room_enabled and interpretation.interpreter == RoomInterpretation.INTERPRETER_NONE:
+        changed_interpreter = "interpreter" in data and interpretation.interpreter != old_interpreter
+        if changed_room_enabled or changed_interpreter:
+            raise ValueError(_("An interpreter must be selected to enable interpretation for this room."))
 
     # Validation: Enforce AI Configuration Invariants
     trans_enabled = _parse_bool(data.get("enable_transcription", interpretation.enable_transcription))
@@ -233,8 +244,11 @@ def update_room_interpretation(room, event, data: dict) -> RoomInterpretation:
     _apply_backend_config(interpretation, data)
     interpretation.save()
 
-    if "language_streams" in data:
-        notify_video_room_config_changed(event)
+    changed_interpreter = "interpreter" in data and interpretation.interpreter != old_interpreter
+    needs_broadcast = changed_room_enabled or changed_interpreter or "language_streams" in data
+
+    if needs_broadcast:
+        transaction.on_commit(lambda: notify_video_room_config_changed(event))
 
     if was_running and (
         not interpretation.room_enabled

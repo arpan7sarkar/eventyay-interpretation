@@ -111,13 +111,7 @@ def _do_sync_single_room_to_voxbento(
     try:
         event = Event._base_manager.get(pk=event_id)
         grant = getattr(event, "voxbento_oauth_grant", None)
-        if (
-            not grant
-            or grant.event_provisioning_failed
-            or grant.is_disconnected
-            or grant.needs_reauth
-            or grant.webhook_scope_denied
-        ):
+        if not grant or grant.event_provisioning_failed or grant.is_disconnected or grant.needs_reauth:
             return False
 
         if action == "delete":

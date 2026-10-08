@@ -31,6 +31,11 @@
 
                 {% if entry.uses_event_credentials %}
                     {% if entry.configured %}
+                        {% if entry.id == "voxbento" %}
+                        <div class="alert alert-info" style="margin-top: 15px;">
+                            <i class="fa fa-info-circle"></i> {% trans "VoxBento authorization is shared team-wide. Once connected, all event organizers can manage rooms and transcripts." %}
+                        </div>
+                        {% endif %}
                         <div class="interpretation-account-card">
                             <div class="interpretation-account-main">
                                 {% if entry.is_disconnected %}

@@ -104,6 +104,11 @@ class RoomInterpretationViewSet(PretalxViewSetMixin, viewsets.ViewSet):
 
     @action(detail=False, methods=["get", "patch"], url_path="config")
     def config(self, request, room_pk=None, **kwargs):
+        if not plugin_enabled(self.event):
+            from django.core.exceptions import PermissionDenied
+
+            raise PermissionDenied("Interpretation plugin is disabled for this event.")
+
         room = self._ensure_room()
         if request.method == "GET":
             return Response(serialize_room_interpretation(room, self.event))

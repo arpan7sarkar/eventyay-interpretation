@@ -263,6 +263,23 @@ document.addEventListener("DOMContentLoaded", function() {
             });
         });
 
+        var toggleBtns = form.querySelectorAll('.toggle-password');
+        toggleBtns.forEach(function(btn) {
+            btn.addEventListener('click', function(e) {
+                e.preventDefault();
+                var input = btn.previousElementSibling;
+                if (input && input.tagName === 'INPUT') {
+                    if (input.type === 'password') {
+                        input.type = 'text';
+                        btn.innerHTML = '<i class="fa fa-eye-slash"></i>';
+                    } else {
+                        input.type = 'password';
+                        btn.innerHTML = '<i class="fa fa-eye"></i>';
+                    }
+                }
+            });
+        });
+
         if (transProviderSelect) {
             transProviderSelect.addEventListener('change', function() {
                 updateAPIKeys(transProviderSelect, 'transcription');

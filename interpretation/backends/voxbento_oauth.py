@@ -65,9 +65,9 @@ import contextlib
 
 
 @contextlib.contextmanager
-def _get_cache_lock(lock_key):
+def _get_cache_lock(lock_key, timeout=10, blocking_timeout=8):
     if hasattr(cache, "lock"):
-        with cache.lock(lock_key, timeout=10, blocking_timeout=8):
+        with cache.lock(lock_key, timeout=timeout, blocking_timeout=blocking_timeout):
             yield
     else:
         yield
@@ -86,6 +86,9 @@ def get_valid_access_token(grant_id):
             grant.refresh_from_db()
 
             # Re-check after acquiring lock
+            if grant.is_disconnected:
+                raise VoxbentoReauthorizationRequired("Integration disconnected during refresh")
+
             if grant.expires_at and grant.expires_at > timezone.now() + timedelta(seconds=60):
                 return grant.access_token
 
@@ -96,12 +99,52 @@ def get_valid_access_token(grant_id):
             try:
                 new_tokens = call_voxbento_refresh(grant.refresh_token, base_url)
 
+                # Atomic token update to prevent re-connecting a disconnected grant
+                expires_in = new_tokens.get("expires_in", 3600)
+                expires_at = timezone.now() + timedelta(seconds=expires_in)
+
+                updated = (
+                    type(grant)
+                    .objects.filter(id=grant.id, is_disconnected=False, refresh_token=grant.refresh_token)
+                    .update(
+                        access_token=new_tokens["access_token"],
+                        refresh_token=new_tokens["refresh_token"],
+                        expires_at=expires_at,
+                        needs_reauth=False,
+                    )
+                )
+
+                if updated == 0:
+                    # Best-effort revoke the newly issued token since we aren't saving it
+                    try:
+                        from eventyay.base.settings import GlobalSettingsObject
+
+                        client_id = GlobalSettingsObject().settings.get("voxbento_client_id", "")
+                        client_secret = GlobalSettingsObject().settings.get("voxbento_client_secret", "")
+                        if client_id:
+                            response = requests.post(
+                                f"{base_url.rstrip('/')}/oauth/revoke",
+                                data={
+                                    "token": new_tokens["access_token"],
+                                    "client_id": client_id,
+                                    "client_secret": client_secret,
+                                },
+                                timeout=(3.0, 5.0),
+                            )
+                            if not response.ok:
+                                import logging
+
+                                logging.getLogger(__name__).warning(
+                                    "VoxBento returned %s while revoking token after disconnect", response.status_code
+                                )
+                    except Exception:
+                        pass
+                    raise VoxbentoReauthorizationRequired("Integration disconnected during refresh network call")
+
                 grant.access_token = new_tokens["access_token"]
                 grant.refresh_token = new_tokens["refresh_token"]
-                expires_in = new_tokens.get("expires_in", 3600)
-                grant.expires_at = timezone.now() + timedelta(seconds=expires_in)
+                grant.expires_at = expires_at
                 grant.needs_reauth = False
-                grant.save(update_fields=["access_token", "refresh_token", "expires_at", "needs_reauth"])
 
                 return grant.access_token
 
