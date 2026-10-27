@@ -170,6 +170,9 @@ def _do_sync_single_room_to_voxbento(
             return False
 
         room = room_instance if room_instance else Room.objects.get(id=room_id)
+        if room.deleted:
+            return False
+
         from .models import RoomInterpretation
 
         interpretation = RoomInterpretation.objects.filter(room_id=room.id).first()

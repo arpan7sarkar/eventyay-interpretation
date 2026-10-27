@@ -123,6 +123,8 @@ def room_interpretation_post_save(sender, instance, created, **kwargs):
 
 @receiver(pre_save, sender=Room, dispatch_uid="interpretation_room_pre_save")
 def room_pre_save(sender, instance, **kwargs):
+    if instance.deleted:
+        return
     if PLUGIN_MODULE not in instance.event.get_plugins():
         return
     if not is_interpretation_enabled(instance.event):
@@ -165,14 +167,17 @@ def room_pre_save(sender, instance, **kwargs):
 
 @receiver(post_save, sender=Room, dispatch_uid="interpretation_room_post_save")
 def room_post_save(sender, instance, created, **kwargs):
-    if not created:
+    if not created and not instance.deleted:
         return
     if PLUGIN_MODULE not in instance.event.get_plugins():
         return
     if not is_interpretation_enabled(instance.event):
         return
 
-    transaction.on_commit(lambda: sync_single_room_to_voxbento.delay(instance.id, instance.event_id, "upsert"))
+    room_id = instance.id
+    event_id = instance.event_id
+    action = "delete" if instance.deleted else "upsert"
+    transaction.on_commit(lambda: sync_single_room_to_voxbento.delay(room_id, event_id, action))
 
 
 @receiver(post_delete, sender=Room, dispatch_uid="interpretation_room_post_delete")
