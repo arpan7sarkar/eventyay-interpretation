@@ -118,8 +118,9 @@ class XFrameOptionsSameOriginMixin:
         # Ensure frame-ancestors 'self' is applied across django-csp and Eventyay middleware.
         if not hasattr(response, "_csp_update") or response._csp_update is None:
             response._csp_update = {}
+        response._csp_update.pop("FRAME_ANCESTORS", None)
+        response._csp_update.pop("SCRIPT_SRC", None)
         response._csp_update["frame-ancestors"] = ["'self'"]
-        response._csp_update["FRAME_ANCESTORS"] = "'self'"
 
         if "Content-Security-Policy" in response:
             csp = response["Content-Security-Policy"]
@@ -132,8 +133,8 @@ class XFrameOptionsSameOriginMixin:
 @method_decorator(
     csp_update(
         {
-            "SCRIPT_SRC": "'self' 'unsafe-eval' https://js.stripe.com",
-            "FRAME_ANCESTORS": "'self'",
+            "script-src": ["'self'", "'unsafe-eval'"],
+            "frame-ancestors": ["'self'"],
         }
     ),
     name="dispatch",
@@ -179,6 +180,19 @@ class InterpretationOverview(
         room_context = room_view.get_context_data()
         context.update(room_context)
         context["voxbento_grant"] = grant
+
+        from eventyay.base.settings import GlobalSettingsObject
+
+        from .backends.voxbento_credentials import get_voxbento_base_url
+
+        client_id = GlobalSettingsObject().settings.get("voxbento_client_id", "")
+        voxbento_base = ""
+        try:
+            voxbento_base = get_voxbento_base_url(event)
+        except Exception:
+            pass
+        context["voxbento_globally_configured"] = bool(client_id and voxbento_base)
+
         return render(request, self.template_name, context)
 
     def post(self, request, *args, **kwargs):

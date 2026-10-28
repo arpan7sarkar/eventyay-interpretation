@@ -1,0 +1,22 @@
+{% load i18n static %}
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% trans "Configuration Required" %}</title>
+    <link rel="stylesheet" href="{% static 'interpretation/css/oauth_popup.css' %}">
+</head>
+<body id="oauth-error-body" data-redirect-url="{{ dashboard_url }}">
+    <div class="card">
+        <div class="icon-circle icon-warning">⚠️</div>
+        <h3>{% trans "VoxBento Setup Required" %}</h3>
+        <p>{{ error_message }}</p>
+        <button type="button" class="btn" id="btn-close-window">{% trans "Close Window" %}</button>
+        <a href="{{ dashboard_url }}" class="fallback-link" id="link-fallback">
+            {% trans "Return to Dashboard" %}
+        </a>
+    </div>
+    <script src="{% static 'interpretation/js/oauth_callback.js' %}"></script>
+</body>
+</html>

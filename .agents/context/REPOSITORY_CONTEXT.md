@@ -32,6 +32,13 @@ Before Eventyay can do anything with VoxBento, the two servers need to trust eac
 * This initiates an OAuth 2.0 PKCE flow. 
 * Eventyay redirects the user to VoxBento to log in. VoxBento issues a secure grant, and Eventyay stores a highly secure, encrypted `webhook_secret_key` in the `VoxbentoOAuthGrant` database table.
 
+OAuth attempts store the Eventyay event primary key alongside state and the PKCE
+verifier in the server-side session. The callback consumes and validates that
+attempt before resolving the event and rechecking organizer permission. Token
+exchange sends the resolved event slug as `event` so VoxBento rejects codes issued
+for another event before granting ownership. In-flight attempts created before
+this event-ID binding was deployed must restart using Connect to VoxBento.
+
 ### Phase 2: The Nervous System (Webhooks & Celery)
 Eventyay needs to know what is happening inside VoxBento (e.g., *Did an interpreter just go live? Are captions available?*). 
 * Eventyay uses a background Celery task to call VoxBento and subscribe to webhooks.
