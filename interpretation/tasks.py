@@ -172,6 +172,9 @@ def _do_sync_single_room_to_voxbento(
             if Room.objects.filter(id=room_id, deleted=False).exists():
                 return False
             delete_voxbento_room(event, room_id)
+            if Room.objects.filter(id=room_id, deleted=False).exists():
+                transaction.on_commit(lambda: sync_single_room_to_voxbento.delay(room_id, event_id, "upsert"))
+                return False
             with transaction.atomic():
                 interpretation = (
                     RoomInterpretation.objects.select_for_update()
@@ -370,8 +373,9 @@ def _do_sync_single_room_to_voxbento(
         return False
     except requests.RequestException as e:
         logger.warning(f"Request exception when syncing room {room_id}: {e}")
-        if action != "delete" and not Room.objects.filter(id=room_id, deleted=False).exists():
-            transaction.on_commit(lambda: sync_single_room_to_voxbento.delay(room_id, event_id, "delete"))
+        current_action = "upsert" if Room.objects.filter(id=room_id, deleted=False).exists() else "delete"
+        if action != current_action:
+            transaction.on_commit(lambda: sync_single_room_to_voxbento.delay(room_id, event_id, current_action))
             return False
         return True
 

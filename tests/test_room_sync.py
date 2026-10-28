@@ -223,6 +223,48 @@ def test_restore_before_commit_does_not_delete_active_room(
     upsert.assert_called_once()
 
 
+@pytest.mark.parametrize("timed_out", [False, True])
+def test_inflight_delete_reconciles_concurrent_restoration(
+    room, room_sync, django_capture_on_commit_callbacks, timed_out
+):
+    upsert, delete = room_sync
+    interpretation = RoomInterpretation.objects.create(
+        room=room,
+        interpreter=RoomInterpretation.INTERPRETER_VOXBENTO,
+        backend_session_id="77",
+        backend_config={"voxbento_room_id": "77"},
+    )
+    Room.objects.filter(pk=room.pk).update(deleted=True)
+    remote_rooms = {room.pk}
+
+    def upsert_remote_room(event, pk, payload):
+        remote_rooms.add(pk)
+        return {"room_id": 77}
+
+    upsert.side_effect = upsert_remote_room
+
+    def finish_delete_after_restore(event, pk):
+        Room.objects.filter(pk=pk).update(deleted=False)
+        assert not _do_sync_single_room_to_voxbento(pk, event.pk, "upsert")
+        assert remote_rooms == {pk}
+        remote_rooms.discard(pk)
+        if timed_out:
+            raise requests.Timeout("Response lost after the room was deleted")
+
+    delete.side_effect = finish_delete_after_restore
+
+    with django_capture_on_commit_callbacks(execute=True):
+        assert not _do_sync_single_room_to_voxbento(room.pk, room.event_id, "delete")
+        assert not remote_rooms
+
+    room.refresh_from_db()
+    interpretation.refresh_from_db()
+    assert not room.deleted
+    assert remote_rooms == {room.pk}
+    assert interpretation.backend_session_id == "77"
+    assert interpretation.backend_config["voxbento_room_id"] == "77"
+
+
 def test_stale_delete_task_does_not_remove_active_room(room, room_sync):
     upsert, delete = room_sync
 
