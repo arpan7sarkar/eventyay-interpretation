@@ -1,21 +1,32 @@
 import base64
 import hashlib
+import logging
 import os
+import secrets
 import time
 import urllib.parse
+from datetime import timedelta
 
+import redis.exceptions
+import requests
 from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin
-from django.http import HttpResponse
-from django.shortcuts import redirect
+from django.db import IntegrityError, transaction
+from django.shortcuts import redirect, render
 from django.urls import reverse
+from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 from django.views.generic import View
 from eventyay.base.models import Event
 from eventyay.base.settings import GlobalSettingsObject
 from eventyay.control.permissions import EventPermissionRequiredMixin
 
+from .backends.voxbento_credentials import get_voxbento_base_url
+from .backends.voxbento_oauth import _get_cache_lock
 from .models import VoxbentoOAuthGrant
+from .tasks import sync_voxbento_connection
+
+logger = logging.getLogger(__name__)
 
 
 def generate_pkce():
@@ -39,26 +50,49 @@ class VoxbentoOAuthConnectView(EventPermissionRequiredMixin, View):
         )
         client_id = GlobalSettingsObject().settings.get("voxbento_client_id", "")
         if not client_id:
-            messages.error(request, _("Please configure the VoxBento Client ID in Global Settings first."))
-            return redirect(dashboard_url)
+            msg = _("Please configure the VoxBento Client ID in Global Settings first.")
+            messages.error(request, msg)
+            response = render(
+                request,
+                "interpretation/oauth_error.html",
+                {"error_message": msg, "dashboard_url": dashboard_url},
+            )
+            response._csp_update = {"frame-ancestors": ["'self'"]}
+            return response
 
         redirect_uri = self.request.build_absolute_uri(reverse("plugins:interpretation:oauth_callback"))
         redirect_uri = redirect_uri.split("?")[0]  # Strip automatically appended ?event= kwargs
 
-        from .backends.voxbento_credentials import get_voxbento_base_url
+        try:
+            voxbento_base = get_voxbento_base_url(event)
+        except Exception as e:
+            msg = str(e)
+            messages.error(request, msg)
+            response = render(
+                request,
+                "interpretation/oauth_error.html",
+                {"error_message": msg, "dashboard_url": dashboard_url},
+            )
+            response._csp_update = {"frame-ancestors": ["'self'"]}
+            return response
 
-        voxbento_base = get_voxbento_base_url(event)
         if not voxbento_base:
-            messages.error(request, _("Please configure the VoxBento Base URL in Interpreter settings first."))
-            return redirect(dashboard_url)
+            msg = _("Please configure the VoxBento Base URL in Global Settings first.")
+            messages.error(request, msg)
+            response = render(
+                request,
+                "interpretation/oauth_error.html",
+                {"error_message": msg, "dashboard_url": dashboard_url},
+            )
+            response._csp_update = {"frame-ancestors": ["'self'"]}
+            return response
 
         verifier, challenge = generate_pkce()
 
-        import secrets
-
         state = f"{event.slug}::{secrets.token_urlsafe(16)}"
-        request.session[f"voxbento_oauth_state:{event.slug}"] = {
+        request.session[f"voxbento_oauth_state:{state}"] = {
             "state": state,
+            "event_id": event.pk,
             "code_verifier": verifier,
             "timestamp": time.time(),
         }
@@ -87,122 +121,103 @@ class VoxbentoOAuthConnectView(EventPermissionRequiredMixin, View):
 
 
 class VoxbentoOAuthCallbackView(LoginRequiredMixin, View):
-    def _popup_response(self, url):
-        html = f"""
-        <html><body>
-        <script>
-            try {{
-                const bc = new BroadcastChannel('oauth_channel');
-                bc.postMessage('oauth_complete');
-            }} catch (e) {{
-                console.error(e);
-            }}
-            try {{
-                if (window.opener && window.opener !== window) {{
-                    window.opener.postMessage('oauth_complete', window.location.origin);
-                }}
-            }} catch (e) {{
-                console.error(e);
-            }}
-            try {{
-                window.close();
-            }} catch (e) {{
-                console.error(e);
-            }}
-            setTimeout(function() {{
-                if (window.opener && window.opener !== window) {{
-                    try {{ window.opener.location.reload(); }} catch (e) {{}}
-                }}
-                try {{
-                    window.close();
-                }} catch (e) {{}}
-                setTimeout(function() {{
-                    window.location.href = "{url}";
-                }}, 400);
-            }}, 300);
-        </script>
-        </body></html>
-        """
-        return HttpResponse(html)
+    def _popup_response(self, url, success=False, error_message=""):
+        context = {
+            "redirect_url": url,
+            "success": success,
+            "error_message": error_message,
+        }
+        response = render(self.request, "interpretation/oauth_callback.html", context)
+        response._csp_update = {
+            "frame-ancestors": ["'self'"],
+        }
+        return response
 
     def get(self, request, *args, **kwargs):
         state = request.GET.get("state", "")
         if "::" not in state:
-            messages.error(request, _("Invalid OAuth state format."))
-            return self._popup_response(reverse("control:index"))
+            msg = _("Invalid OAuth state format.")
+            messages.error(request, msg)
+            return self._popup_response(reverse("control:index"), success=False, error_message=msg)
 
-        event_slug, original_state = state.split("::", 1)
+        # Resolve identity only from a validated, single-use server-side attempt.
+        # Attempts started before event_id was stored must restart authorization.
+        session_data = request.session.pop(f"voxbento_oauth_state:{state}", None)
+        if not session_data or not session_data.get("event_id"):
+            msg = _("OAuth authorization failed: Session expired or already consumed. Please connect again.")
+            messages.error(request, msg)
+            return self._popup_response(reverse("control:index"), success=False, error_message=msg)
+
+        if session_data.get("state") != state or time.time() - session_data.get("timestamp", 0) > 600:
+            msg = _("OAuth authorization failed: Invalid or expired state.")
+            messages.error(request, msg)
+            return self._popup_response(reverse("control:index"), success=False, error_message=msg)
 
         try:
-            event = Event.objects.get(slug=event_slug)
+            event = Event.objects.get(pk=session_data["event_id"])
         except Event.DoesNotExist:
-            messages.error(request, _("Event not found for OAuth callback."))
-            return self._popup_response(reverse("control:index"))
+            msg = _("Event not found for OAuth callback.")
+            messages.error(request, msg)
+            return self._popup_response(reverse("control:index"), success=False, error_message=msg)
 
-        dashboard_url = f"/video/event/{event.organizer.slug}/{event.slug}/event/interpretation/"
+        if not request.user.has_event_permission(event.organizer, event, "can_change_event_settings", request=request):
+            msg = _("Permission denied for this event.")
+            messages.error(request, msg)
+            return self._popup_response(reverse("control:index"), success=False, error_message=msg)
+
+        try:
+            dashboard_url = reverse(
+                "plugins:interpretation:dashboard",
+                kwargs={"organizer": event.organizer.slug, "event": event.slug},
+            )
+        except Exception:
+            dashboard_url = f"/video/event/{event.organizer.slug}/{event.slug}/event/interpretation/"
 
         error = request.GET.get("error")
         error_description = request.GET.get("error_description", "")
         if error:
             if error == "access_denied":
-                messages.error(request, _("VoxBento connection was cancelled."))
+                msg = _("VoxBento connection was cancelled.")
             elif "403" in error_description or error == "unauthorized_client":
-                messages.error(
-                    request,
-                    _(
-                        "OAuth authorization failed: You do not have permission. "
-                        "Ensure you are a team co-owner in VoxBento or that your team settings allow this."
-                    ),
+                msg = _(
+                    "OAuth authorization failed: You do not have permission. "
+                    "Ensure you are a team co-owner in VoxBento or that your team settings allow this."
                 )
             else:
                 msg = _("OAuth authorization failed: ") + error
                 if error_description:
                     msg += f" ({error_description})"
-                messages.error(request, msg)
-            return self._popup_response(dashboard_url)
-
-        session_data = request.session.pop(f"voxbento_oauth_state:{event.slug}", None)
-
-        if not session_data:
-            messages.error(request, _("OAuth authorization failed: Session expired or already consumed."))
-            return self._popup_response(dashboard_url)
-
-        if session_data.get("state") != state or time.time() - session_data.get("timestamp", 0) > 600:
-            messages.error(request, _("OAuth authorization failed: Invalid or expired state."))
-            return self._popup_response(dashboard_url)
+            messages.error(request, msg)
+            return self._popup_response(dashboard_url, success=False, error_message=msg)
 
         code = request.GET.get("code")
         if not code:
-            messages.error(request, _("OAuth authorization failed: No code provided."))
-            return self._popup_response(dashboard_url)
+            msg = _("OAuth authorization failed: No code provided.")
+            messages.error(request, msg)
+            return self._popup_response(dashboard_url, success=False, error_message=msg)
 
         code_verifier = session_data.get("code_verifier")
         if not code_verifier:
-            messages.error(request, _("OAuth authorization failed: Missing PKCE code verifier in session."))
-            return self._popup_response(dashboard_url)
-
-        if not request.user.has_event_permission(event.organizer, event, "can_change_event_settings", request=request):
-            messages.error(request, _("Permission denied for this event."))
-            return self._popup_response(dashboard_url)
-
-        from eventyay.base.settings import GlobalSettingsObject
+            msg = _("OAuth authorization failed: Missing PKCE code verifier in session.")
+            messages.error(request, msg)
+            return self._popup_response(dashboard_url, success=False, error_message=msg)
 
         client_id = GlobalSettingsObject().settings.get("voxbento_client_id", "")
         client_secret = GlobalSettingsObject().settings.get("voxbento_client_secret", "")
         redirect_uri = self.request.build_absolute_uri(reverse("plugins:interpretation:oauth_callback"))
         redirect_uri = redirect_uri.split("?")[0]  # Strip automatically appended ?event= kwargs
-        from .backends.voxbento_credentials import get_voxbento_base_url
 
-        voxbento_base = get_voxbento_base_url(event)
+        try:
+            voxbento_base = get_voxbento_base_url(event)
+        except Exception as e:
+            msg = str(e)
+            messages.error(request, msg)
+            return self._popup_response(dashboard_url, success=False, error_message=msg)
+
         if not voxbento_base:
-            messages.error(request, _("VoxBento Base URL is not configured."))
-            return self._popup_response(dashboard_url)
-
-        import logging
-
-        import requests
-
-        logger = logging.getLogger(__name__)
+            msg = _("VoxBento Base URL is not configured.")
+            messages.error(request, msg)
+            return self._popup_response(dashboard_url, success=False, error_message=msg)
 
         old_access_token = None
         old_webhook_id = None
@@ -217,16 +232,12 @@ class VoxbentoOAuthCallbackView(LoginRequiredMixin, View):
                     "code": code,
                     "redirect_uri": redirect_uri,
                     "code_verifier": code_verifier,
+                    "event": event.slug,
                 },
                 timeout=(3.0, 5.0),
             )
             resp.raise_for_status()
             data = resp.json()
-
-            from datetime import timedelta
-
-            from django.db import IntegrityError, transaction
-            from django.utils import timezone
 
             expires_in = data.get("expires_in", 3600)
             expires_at = timezone.now() + timedelta(seconds=expires_in)
@@ -243,10 +254,6 @@ class VoxbentoOAuthCallbackView(LoginRequiredMixin, View):
             }
 
             try:
-                import redis.exceptions
-
-                from interpretation.backends.voxbento_oauth import _get_cache_lock
-
                 existing_grant = VoxbentoOAuthGrant.objects.filter(event=event).first()
                 lock_key = (
                     f"voxbento:refresh:{existing_grant.id}" if existing_grant else f"voxbento:refresh:new:{event.id}"
@@ -262,8 +269,9 @@ class VoxbentoOAuthCallbackView(LoginRequiredMixin, View):
                                 defaults=defaults,
                             )
                 except redis.exceptions.LockError:
-                    messages.error(request, _("The integration is currently syncing. Please try again."))
-                    return self._popup_response(dashboard_url)
+                    msg = _("The integration is currently syncing. Please try again.")
+                    messages.error(request, msg)
+                    return self._popup_response(dashboard_url, success=False, error_message=msg)
             except IntegrityError:
                 with transaction.atomic():
                     grant = VoxbentoOAuthGrant.objects.select_for_update().get(event=event)
@@ -273,25 +281,31 @@ class VoxbentoOAuthCallbackView(LoginRequiredMixin, View):
                         setattr(grant, k, v)
                     grant.save()
 
-            from .tasks import sync_voxbento_connection
-
             transaction.on_commit(lambda: sync_voxbento_connection.delay(event.id))
-
             messages.success(request, _("Successfully connected to VoxBento!"))
 
             if old_webhook_id and old_access_token:
                 try:
                     headers = {"Authorization": f"Bearer {old_access_token}"}
                     delete_url = f"{voxbento_base.rstrip('/')}/api/v1/webhooks/{old_webhook_id}"
-                    resp = requests.delete(delete_url, headers=headers, timeout=(3.0, 5.0))
-                    if resp.status_code not in (204, 404):
+                    del_resp = requests.delete(delete_url, headers=headers, timeout=(3.0, 5.0))
+                    if del_resp.status_code not in (204, 404):
                         logger.warning(
-                            f"Failed to delete old webhook during reconnect for event {event.slug}: {resp.status_code}"
+                            "Failed to delete old webhook during reconnect for event %s: %s",
+                            event.slug,
+                            del_resp.status_code,
                         )
                 except requests.exceptions.RequestException as e:
                     logger.warning(f"Failed to delete old webhook during reconnect for event {event.slug}: {e}")
 
         except Exception as e:
-            messages.error(request, _("Failed to exchange OAuth token: ") + str(e))
+            err_msg = str(e) or e.__class__.__name__
+            full_msg = _("Failed to exchange OAuth token: ") + err_msg
+            messages.error(request, full_msg)
+            return self._popup_response(
+                dashboard_url,
+                success=False,
+                error_message=full_msg,
+            )
 
-        return self._popup_response(dashboard_url)
+        return self._popup_response(dashboard_url, success=True)

@@ -1,0 +1,28 @@
+{% load i18n static %}
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% trans "VoxBento Authentication" %}</title>
+    <link rel="stylesheet" href="{% static 'interpretation/css/oauth_popup.css' %}">
+</head>
+<body id="oauth-callback-body" data-redirect-url="{{ redirect_url }}" data-success="{% if success %}true{% else %}false{% endif %}">
+    <div class="card">
+        {% if success %}
+            <div class="icon-circle icon-success">✓</div>
+            <h3>{% trans "Connected to VoxBento" %}</h3>
+            <p>{% trans "Authentication was successful! You can close this window now." %}</p>
+        {% else %}
+            <div class="icon-circle icon-error">✕</div>
+            <h3>{% trans "Connection Failed" %}</h3>
+            <p>{{ error_message|default:_("Authentication could not be completed.") }}</p>
+        {% endif %}
+        <button type="button" class="btn" id="btn-close-window">{% trans "Close Window" %}</button>
+        <a href="{{ redirect_url }}" class="fallback-link" id="link-fallback">
+            {% trans "Click here to return to Eventyay" %}
+        </a>
+    </div>
+    <script src="{% static 'interpretation/js/oauth_callback.js' %}"></script>
+</body>
+</html>

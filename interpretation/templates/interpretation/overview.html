@@ -4,11 +4,11 @@
 {% load static %}
 
 {% block custom_header %}
-    <script nonce="{{ request.csp_nonce }}" src="{% static 'interpretation/js/dashboard.js' %}?v=2"></script>
+    <script src="{% static 'interpretation/js/dashboard.js' %}?v=20261027_02"></script>
     {{ block.super }}
     <link rel="stylesheet" type="text/css" href="{% static 'interpretation/dashboard.css' %}" />
     <link rel="stylesheet" href="{% static 'interpretation/css/embedded.css' %}">
-    <script nonce="{{ request.csp_nonce }}" src="{% static 'interpretation/js/embedded.js' %}"></script>
+    <script src="{% static 'interpretation/js/embedded.js' %}"></script>
 {% endblock %}
 
 {% block title %}{% trans "Interpretation" %}{% endblock %}
@@ -188,6 +188,12 @@
                             {% trans "Connect a third-party interpretation service." %}
                         {% endif %}
                     </p>
+                    {% if entry.id == "voxbento" and not entry.configured and not voxbento_globally_configured %}
+                        <div class="alert alert-warning" style="margin-top: 10px; margin-bottom: 0; font-size: 13px;">
+                            <i class="fa fa-exclamation-triangle"></i>
+                            {% trans "VoxBento is not configured in Global Settings. Please ask an administrator to set the VoxBento Base URL and Client ID before connecting." %}
+                        </div>
+                    {% endif %}
                 </div>
                 <div class="interpretation-service-actions">
                     {% if entry.uses_event_credentials %}
@@ -195,8 +201,9 @@
                             {% if entry.id == "voxbento" %}
                                 <a href="{% url 'plugins:interpretation:oauth_connect' organizer=request.event.organizer.slug event=request.event.slug %}"
                                    target="voxbento_oauth"
-                                   onclick="window.open(this.href, 'voxbento_oauth', 'width=600,height=700'); return false;"
-                                   class="btn btn-primary"
+                                   class="btn btn-primary js-voxbento-popup"
+                                   data-popup-width="600"
+                                   data-popup-height="700"
                                    style="margin-bottom:10px;">
                                     <i class="fa fa-plug"></i> {% if entry.is_disconnected %}{% trans "Connect" %}{% else %}{% trans "Connect" %}{% endif %}
                                 </a>
@@ -225,9 +232,10 @@
                                 {% if backend.id == "voxbento" %}
                                 <a href="{% url 'plugins:interpretation:oauth_connect' organizer=request.event.organizer.slug event=request.event.slug %}"
                                    target="voxbento_oauth"
-                                   onclick="window.open(this.href, 'voxbento_oauth', 'width=600,height=700'); return false;"
-                                   class="btn btn-default"
+                                   class="btn btn-default js-voxbento-popup"
                                    id="btn-reconnect-voxbento"
+                                   data-popup-width="600"
+                                   data-popup-height="700"
                                    style="color: #0284c7; border-color: #0284c7;"
                                    title="{% trans 'Link or switch your personal VoxBento account for this event' %}">
                                     <i class="fa fa-user-plus"></i> {% trans "Connect / Switch Account" %}
@@ -509,38 +517,6 @@
             </div>
         </div>
     </div>
-    
-    <script nonce="{{ request.csp_nonce }}">
-    document.addEventListener("DOMContentLoaded", function() {
-        if (window.location.hash === '#rooms' || window.location.search.indexOf('room=') !== -1) {
-            $('.nav-tabs a[href="#rooms"]').tab('show');
-        }
-        var match = window.location.search.match(/room=(\d+)/);
-        if (match && match[1]) {
-            var roomId = match[1];
-            var $panel = $('#room-panel-' + roomId);
-            if ($panel.length) {
-                setTimeout(function() {
-                    $panel.collapse('show');
-                    $panel[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
-                }, 100);
-            }
-        }
-        var match = window.location.search.match(/room=(\d+)/);
-        if (match && match[1]) {
-            var roomId = match[1];
-            var $panel = $('#room-panel-' + roomId);
-            if ($panel.length) {
-                setTimeout(function() {
-                    $panel.collapse('show');
-                    $panel[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
-                }, 100);
-            }
-        }
-    });
-    
-    
-</script>
 
 <div class="modal fade" id="deleteVoxBentoEventModal" tabindex="-1" role="dialog" aria-labelledby="deleteVoxBentoEventModalLabel">
   <div class="modal-dialog" role="document" style="margin-top: 100px;">
@@ -567,7 +543,7 @@
     </div>
   </div>
 </div>
-<script nonce="{{ request.csp_nonce }}" src="{% static 'interpretation/js/delete-event.js' %}"></script>
+<script src="{% static 'interpretation/js/delete-event.js' %}"></script>
 
 <div style="display: none;">
     {% include "interpretation/event_enable_form.html" with form=event_settings_form %}
